@@ -101,7 +101,7 @@ public:
         return 0;
     }
 
-   static int Receive(char *buffer, std::size_t bufferSize)
+    static int Receive(char *buffer, std::size_t bufferSize)
     {
         if (!ssl || !buffer || bufferSize == 0)
             return -1;

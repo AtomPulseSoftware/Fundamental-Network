@@ -53,72 +53,50 @@ public:
 		return 0;
 	}
 
-	static bool Listen(std::vector<SSL *> *clients, int &error, const bool run)
+	static int Listen(SSL *client)
 	{
-		while (run)
+		if (!client || !ctx || !accept_bio)
+			return 1;
+		if (BIO_do_accept(accept_bio) <= 0)
+			return 2;
+
+		BIO *clientBio = BIO_pop(accept_bio);
+		if (!clientBio)
+			return 3;
+
+		SSL *ssl = SSL_new(ctx);
+		if (!ssl)
 		{
-			if (!clients || !ctx || !accept_bio)
-				return 0;
-			if (BIO_do_accept(accept_bio) <= 0)
-			{
-				error = 0;
-				continue;
-			}
-			
-			BIO *clientBio = BIO_pop(accept_bio);
-			if (!clientBio)
-			{
-				error = 1;
-				continue;
-			}
-
-			SSL *ssl = SSL_new(ctx);
-			if (!ssl)
-			{
-				BIO_free_all(clientBio);
-				error = 2;
-				continue;
-			}
-
-			SSL_set_bio(ssl, clientBio, clientBio);
-			if (SSL_accept(ssl) <= 0)
-			{
-				SSL_free(ssl);
-				error = 3;
-				continue;
-			}
-
-			try
-			{
-				clients->push_back(ssl);
-			}
-			catch (...)
-			{
-				SSL_free(ssl);
-				throw;
-			}
+			BIO_free_all(clientBio);
+			return 4;
 		}
-		return 1;
+
+		SSL_set_bio(ssl, clientBio, clientBio);
+		if (SSL_accept(ssl) <= 0)
+		{
+			SSL_free(ssl);
+			return 5;
+		}
+
+		client = ssl;
+		return 0;
 	}
 
-	static int HandleClient(SSL *ssl, char *buffer, std::size_t bufferSize)
+	static int HandleClient(SSL *ssl, char *buffer, size_t bufferSize)
 	{
 		if (!ssl || !buffer || bufferSize == 0)
 			return 1;
+		const int capacity = static_cast<int>(
+			bufferSize > static_cast<size_t>(INT_MAX)
+				? INT_MAX
+				: bufferSize);
+		char *dummy = nullptr;
+		const int bytesRead = SSL_read(ssl, dummy, capacity);
+		if (bytesRead > 0)
+			return 0;
 
-		for (;;)
-		{
-			const int capacity = static_cast<int>(
-				bufferSize > static_cast<std::size_t>(INT_MAX)
-					? INT_MAX
-					: bufferSize);
-			const int bytesRead = SSL_read(ssl, buffer, capacity);
-			if (bytesRead > 0)
-				continue;
-
-			const int error = SSL_get_error(ssl, bytesRead);
-			return error == SSL_ERROR_ZERO_RETURN ? 0 : 2;
-		}
+		const int error = SSL_get_error(ssl, bytesRead);
+		return error == SSL_ERROR_ZERO_RETURN ? 0 : 2;
 	}
 
 	static int Send(SSL *ssl, const char *data)
