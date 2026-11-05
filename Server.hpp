@@ -140,8 +140,18 @@ public:
 		return 0;
 	}
 
-	static void Shutdown()
+	static void Shutdown(std::vector<SSL *> &clientConnections)
 	{
+		for (SSL *ssl : clientConnections)
+		{
+			if (ssl)
+			{
+				SSL_shutdown(ssl);
+				SSL_free(ssl);
+			}
+		}
+		clientConnections.clear();
+
 		if (accept_bio)
 		{
 			BIO_free_all(accept_bio);
