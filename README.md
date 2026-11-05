@@ -1,41 +1,41 @@
-# Funamental Network
+# Fundamental Network
 
-A small, header-only C++ wrapper around OpenSSL for TLS client connections, server-side connection handling, and sending/receiving text data.
+A small, header-only C++ wrapper around OpenSSL for establishing TLS client connections and accepting TLS connections on the server side.
 
-> **Status:** The API is intentionally small. Review the limitations below before using it in a production server.
+> **Status:** The client API can connect, send, and receive null-terminated text. The server API currently has implementation defects: `Listen` does not return the accepted `SSL*` to its caller, and `HandleClient` calls `SSL_read` with a null buffer. Do not rely on these server methods for application traffic until they are fixed.
 
 ## Features
 
-- TLS client and server setup using OpenSSL.
-- Client certificate-chain and hostname verification.
+- TLS client and server context setup with OpenSSL.
 - TLS 1.2 or newer.
-- Simple `Send` and `Receive` helpers.
-- Header-only integration; no library build step is required.
+- Client certificate-chain and host verification, using system trust paths by default or a supplied CA file.
+- Helpers for sending and receiving null-terminated text on the client.
+- Header-only integration; no library build step is provided.
 
 ## Requirements
 
 - C++17 or newer (`inline static` class members are used).
 - OpenSSL development headers and libraries (OpenSSL 1.1.1 or newer recommended).
-- A server certificate and matching private key. The client must trust the certificate's issuing CA.
+- For a server, a PEM certificate chain and its matching private key.
 
 ## Add to a CMake project
 
-If OpenSSL is installed and discoverable by CMake, add the repository headers to your project and link OpenSSL:
+If OpenSSL is installed and discoverable by CMake, add this repository's directory to your include path and link OpenSSL:
 
 ```cmake
 find_package(OpenSSL REQUIRED)
 
 add_executable(my_app main.cpp)
 target_compile_features(my_app PRIVATE cxx_std_17)
-target_include_directories(my_app PRIVATE /path/to/Funamental-Network)
+target_include_directories(my_app PRIVATE /path/to/Fundamental-Network)
 target_link_libraries(my_app PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 ```
 
-Replace `/path/to/Funamental-Network` with the directory containing `Client.hpp` and `Server.hpp`. This repository currently provides no CMake project of its own; the snippet shows how to consume the headers from another project.
+Replace `/path/to/Fundamental-Network` with the directory containing `Client.hpp` and `Server.hpp`. The repository does not currently include its own CMake project.
 
 ## Client example
 
-`Client::Init` connects to the host and completes the TLS handshake. It verifies both the certificate chain and the host name. By default, OpenSSL's system trust store is used; pass a CA file when needed.
+`Client::Init` connects to the host and completes a TLS handshake, verifying the certificate chain and host name. By default, it uses OpenSSL's system trust paths. For a private CA, pass the CA certificate file as the third argument.
 
 ```cpp
 #include "Client.hpp"
@@ -46,7 +46,6 @@ Replace `/path/to/Funamental-Network` with the directory containing `Client.hpp`
 
 int main()
 {
-    // Use a DNS name that appears in the server certificate.
     if (Client::Init("example.com", "443") != 0)
     {
         std::cerr << "TLS connection failed\n";
@@ -74,63 +73,49 @@ int main()
 }
 ```
 
-For a private CA, pass its certificate file as the third argument, for example `Client::Init("server.example", "443", "root-ca.pem")`.
+For a private CA, initialize with `Client::Init("server.example", "443", "root-ca.pem")`.
 
-## Server setup example
+## Server API status
 
-`FNetS` is the server class name in `Server.hpp`. Initialize it with a listening port and a PEM certificate chain/private key, then call `Listen` to accept TLS clients:
+`FNetS` in `Server.hpp` provides server context and listening BIO setup:
 
 ```cpp
-#include "Server.hpp"
-
-#include <vector>
-
-int main()
-{
-    if (FNetS::Init("4433", "server.crt", "server.key") != 0)
-        return 1;
-
-    std::vector<SSL*> clients;
-    int error = 0;
-
-    // Listen blocks while accepting connections.
-    const bool success = FNetS::Listen(&clients, error, true);
-
-    // Handle accepted SSL* connections before shutting the server down.
-    // See the API notes below for current limitations around client handling.
-
-    FNetS::Shutdown();
-    return success ? 0 : 1;
-}
+FNetS::Init("4433", "server.crt", "server.key");
 ```
 
-The certificate and private key must match. Do not commit private keys to source control. For local testing, use a test certificate and configure the client to trust its CA.
+The certificate and private key must match. The defaults are `server.crt` and `server.key`. Do not commit private keys to source control.
+
+The current server methods are **not ready for reliable client handling**:
+
+- `FNetS::Listen(SSL *client)` accepts and handshakes a connection, but `client` is passed by value. Assigning the new `SSL*` inside the function does not make it available to the caller. The accepted connection is therefore not exposed through this API.
+- `FNetS::HandleClient(SSL *ssl, char *buffer, size_t bufferSize)` currently passes a null pointer to `SSL_read` instead of `buffer`. Do not call it; it cannot safely receive data as written.
+- `FNetS::Shutdown()` releases the listening BIO and TLS context. No complete accepted-client ownership or graceful-stop API is currently provided.
+
+These limitations should be fixed in the implementation before using the server API in an application.
 
 ## API overview
 
 ### `Client.hpp`
 
-- `Client::Init(host, port, caFile = nullptr)` — connect and establish a verified TLS session; returns `0` on success.
-- `Client::Send(data)` — send a null-terminated string; returns `0` on success.
-- `Client::Receive(buffer, bufferSize)` — read up to `bufferSize - 1` bytes and append a null terminator. Returns the number of bytes read, `0` when the peer closes the connection, or `-1` on error.
+- `Client::Init(const char *host, const char *port, const char *caFile = nullptr)` — initialize TLS, connect, and verify the peer; returns `0` on success and a nonzero error code on failure.
+- `Client::Send(const char *data)` — send a null-terminated string; returns `0` on success, `1` for invalid/uninitialized input, or `2` for a TLS write failure.
+- `Client::Receive(char *buffer, std::size_t bufferSize)` — read up to `bufferSize - 1` bytes and append a null terminator. Returns the byte count, `0` when the peer closes the TLS connection, or `-1` for invalid input or a read failure.
 - `Client::Shutdown()` — release the connection and TLS context.
 
 ### `Server.hpp`
 
-- `FNetS::Init(port, certificate, privateKey)` — initialize TLS and bind the listening port; returns `0` on success.
-- `FNetS::Listen(&clients, error, run)` — block accepting clients and append successfully handshaken `SSL*` connections to the vector.
-- `FNetS::Send(ssl, data)` — send a null-terminated string to one connected client; returns `0` on success.
-- `FNetS::HandleClient(ssl, buffer, bufferSize)` — read from a client until it disconnects. **Currently, received bytes are discarded rather than copied to `buffer`.**
-- `FNetS::Shutdown()` — release the listening socket and TLS context.
+- `FNetS::Init(const char *port, const char *certificate = "server.crt", const char *privateKey = "server.key")` — configure TLS and bind the listening port; returns `0` on success and a nonzero error code on failure.
+- `FNetS::Listen(SSL *client)` — attempts to accept and complete a TLS handshake, but does not currently return the accepted connection to the caller (see limitations above).
+- `FNetS::HandleClient(SSL *ssl, char *buffer, size_t bufferSize)` — currently unsafe because it passes a null read buffer (see limitations above).
+- `FNetS::Send(SSL *ssl, const char *data)` — send a null-terminated string on an SSL connection; returns `0` on success, `1` for invalid input, or `2` for a TLS write failure.
+- `FNetS::Shutdown()` — release the listening BIO and TLS context.
 
-## Important limitations
+## General limitations
 
-- `Send` and `Receive` work with byte streams, not messages: one send is not guaranteed to correspond to one receive. Add your own framing (for example, a length prefix or newline-delimited protocol) when exchanging multiple messages.
-- The current `FNetS::HandleClient` discards incoming data. It is not yet a message callback or echo handler.
-- `FNetS::Listen` takes `run` by value and blocks during accept, so changing the caller's flag later will not stop the loop. The current API does not provide a complete graceful-stop mechanism.
-- If you use `Listen` on a separate thread, protect shared access to the clients vector yourself. Coordinate TLS reads/writes and connection cleanup so the same `SSL*` is not freed while another thread is using it.
-- `Client` stores its connection in static members, so it supports one active client connection per process.
-- The `Send` functions accept null-terminated strings; they are not suitable for arbitrary binary data containing null bytes.
+- TLS is a byte stream: one call to `Send` is not guaranteed to correspond to one `Receive`. Add message framing, such as a length prefix or newline delimiter, in your application.
+- The send helpers use `strlen` and accept null-terminated strings; they are not suitable for arbitrary binary data containing null bytes.
+- `Client` stores its connection in static members and supports only one active client connection per process.
+- The server's `outputMutex` and client's `outputMutex` are declared but are not used by the current implementation; callers must coordinate concurrent access themselves.
 
 ## License
 
