@@ -1,16 +1,15 @@
 # Fundamental Network
 
-A small, header-only C++ wrapper around OpenSSL for establishing TLS client connections and accepting TLS connections on the server side.
+A small, header-only C++ wrapper around OpenSSL for TLS client connections and server-side connection handling.
 
-> **Status:** The client API can connect, send, and receive null-terminated text. The server API currently has implementation defects: `Listen` does not return the accepted `SSL*` to its caller, and `HandleClient` calls `SSL_read` with a null buffer. Do not rely on these server methods for application traffic until they are fixed.
+> **Status:** The client implementation provides a basic blocking TLS connection, text send, and receive API. The server implementation is **not currently usable**: `FNetS::Listen` always returns `nullptr` because it checks a local `SSL*` that is initialized to `nullptr` and never creates an `SSL` object. `HandleClient` also has an incorrect buffer parameter and validation. See [Known server issues](#known-server-issues) before using the server API.
 
 ## Features
 
-- TLS client and server context setup with OpenSSL.
 - TLS 1.2 or newer.
-- Client certificate-chain and host verification, using system trust paths by default or a supplied CA file.
-- Helpers for sending and receiving null-terminated text on the client.
+- Client peer certificate-chain verification using system trust paths by default or a supplied CA file.
 - Header-only integration; no library build step is provided.
+- Text-oriented send and receive helpers.
 
 ## Requirements
 
@@ -64,7 +63,7 @@ int main()
     if (bytesRead > 0)
         std::cout << "Received: " << std::string(buffer.data(), bytesRead) << '\n';
     else if (bytesRead == 0)
-        std::cout << "The server closed the connection\n";
+        std::cout << "The server closed the connection (or the buffer has no data capacity)\n";
     else
         std::cerr << "Receive failed\n";
 
@@ -75,9 +74,9 @@ int main()
 
 For a private CA, initialize with `Client::Init("server.example", "443", "root-ca.pem")`.
 
-## Server API status
+## Server API
 
-`FNetS` in `Server.hpp` provides server context and listening BIO setup:
+`FNetS` in `Server.hpp` exposes server context setup, a `Listen(int &error)` method, client read/write helpers, and shutdown:
 
 ```cpp
 FNetS::Init("4433", "server.crt", "server.key");
@@ -85,37 +84,41 @@ FNetS::Init("4433", "server.crt", "server.key");
 
 The certificate and private key must match. The defaults are `server.crt` and `server.key`. Do not commit private keys to source control.
 
-The current server methods are **not ready for reliable client handling**:
-
-- `FNetS::Listen(SSL *client)` accepts and handshakes a connection, but `client` is passed by value. Assigning the new `SSL*` inside the function does not make it available to the caller. The accepted connection is therefore not exposed through this API.
-- `FNetS::HandleClient(SSL *ssl, char *buffer, size_t bufferSize)` currently passes a null pointer to `SSL_read` instead of `buffer`. Do not call it; it cannot safely receive data as written.
-- `FNetS::Shutdown()` releases the listening BIO and TLS context. No complete accepted-client ownership or graceful-stop API is currently provided.
-
-These limitations should be fixed in the implementation before using the server API in an application.
+**The server API is not ready for application use.** In the current implementation, `Listen` cannot return an accepted connection, and `HandleClient` does not provide a usable buffer interface. Details are listed below. The signatures are documented for reference only; do not rely on successful server-side client handling until these defects are fixed.
 
 ## API overview
 
 ### `Client.hpp`
 
-- `Client::Init(const char *host, const char *port, const char *caFile = nullptr)` — initialize TLS, connect, and verify the peer; returns `0` on success and a nonzero error code on failure.
+- `Client::Init(const char *ip, const char *port, const char *caFile = nullptr)` — initialize TLS, connect, and verify the peer; returns `0` on success and a nonzero error code on failure.
 - `Client::Send(const char *data)` — send a null-terminated string; returns `0` on success, `1` for invalid/uninitialized input, or `2` for a TLS write failure.
-- `Client::Receive(char *buffer, std::size_t bufferSize)` — read up to `bufferSize - 1` bytes and append a null terminator. Returns the byte count, `0` when the peer closes the TLS connection, or `-1` for invalid input or a read failure.
-- `Client::Shutdown()` — release the connection and TLS context.
+- `Client::Receive(char *buffer, std::size_t bufferSize)` — read up to `bufferSize - 1` bytes and append a null terminator. Returns the byte count, `0` when the peer closes the TLS connection (also returns `0` if the buffer size is `1`), or `-1` for invalid input or a TLS read failure.
+- `Client::Shutdown()` — release the client connection BIO and TLS context.
 
-### `Server.hpp`
+### `Server.hpp` (currently defective)
 
 - `FNetS::Init(const char *port, const char *certificate = "server.crt", const char *privateKey = "server.key")` — configure TLS and bind the listening port; returns `0` on success and a nonzero error code on failure.
-- `FNetS::Listen(SSL *client)` — attempts to accept and complete a TLS handshake, but does not currently return the accepted connection to the caller (see limitations above).
-- `FNetS::HandleClient(SSL *ssl, char *buffer, size_t bufferSize)` — currently unsafe because it passes a null read buffer (see limitations above).
-- `FNetS::Send(SSL *ssl, const char *data)` — send a null-terminated string on an SSL connection; returns `0` on success, `1` for invalid input, or `2` for a TLS write failure.
-- `FNetS::Shutdown()` — release the listening BIO and TLS context.
+- `FNetS::Listen(int &error)` — intended to accept a connection and return its `SSL*`; currently always returns `nullptr` because the local SSL pointer is never created. `error` is set to `3` on that path.
+- `FNetS::HandleClient(SSL *ssl, char &buffer, size_t bufferSize)` — currently unusable as a general buffer reader. It accepts a reference to one `char`, checks the character value as though it were a pointer, and does not append a null terminator.
+- `FNetS::Send(SSL *ssl, const char *data)` — intended to send a null-terminated string on an SSL connection; returns `0` on success, `1` for invalid input, or `2` for a TLS write failure.
+- `FNetS::Shutdown(std::vector<SSL *> &clientConnections)` — shuts down and frees the SSL connections in the supplied vector, then releases the listening BIO and TLS context. The caller must track owned connections and invoke this overload.
+
+## Known server issues
+
+1. **`Listen` never creates an `SSL` object.** It initializes `SSL *ssl = nullptr` and immediately checks `if (!ssl)`, so every accepted socket is freed and the function returns `nullptr` with error code `3`. The later `SSL_set_bio`, handshake, and `BIO_get_ssl` code cannot be reached. The accept/TLS BIO ownership flow needs to be corrected as part of fixing this.
+2. **`HandleClient` has the wrong parameter type and validation.** A `char&` cannot represent a caller-provided character buffer. Also, `!buffer` tests whether the character is NUL, not whether a buffer pointer is null. Change the API to accept a writable pointer (or an appropriate span), validate its capacity, read into it, and document whether/how it terminates text.
+3. **Repeated `FNetS::Init` calls can overwrite existing static resources.** Call `Shutdown` or reject reinitialization before assigning new context/BIO pointers.
+4. **`Listen` reports an uninitialized server as `error = 0`.** That value conventionally indicates success; use a nonzero error code for the invalid state.
+
+Fix and test these issues before using the server API. In particular, test successful accept/handshake, failed handshakes, multiple sequential clients, and cleanup after both success and failure.
 
 ## General limitations
 
 - TLS is a byte stream: one call to `Send` is not guaranteed to correspond to one `Receive`. Add message framing, such as a length prefix or newline delimiter, in your application.
 - The send helpers use `strlen` and accept null-terminated strings; they are not suitable for arbitrary binary data containing null bytes.
 - `Client` stores its connection in static members and supports only one active client connection per process.
-- The server's `outputMutex` and client's `outputMutex` are declared but are not used by the current implementation; callers must coordinate concurrent access themselves.
+- The `outputMutex` members are declared but not used; callers must coordinate concurrent access themselves.
+- The current examples use blocking OpenSSL operations and do not provide timeouts or a nonblocking event loop.
 
 ## License
 
