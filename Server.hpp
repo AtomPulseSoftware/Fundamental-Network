@@ -4,6 +4,7 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
+#include <climits>
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -53,36 +54,54 @@ public:
 		return 0;
 	}
 
-	static int Listen(SSL *client)
+	static SSL *Listen(int &error)
 	{
-		if (!client || !ctx || !accept_bio)
-			return 1;
+		if (!ctx || !accept_bio)
+		{
+			error = 0;
+			return nullptr;
+		}
 		if (BIO_do_accept(accept_bio) <= 0)
-			return 2;
+		{
+			error = 1;
+			return nullptr;
+		}
 
+		SSL *ssl = nullptr;
 		BIO *clientBio = BIO_pop(accept_bio);
 		if (!clientBio)
-			return 3;
+		{
+			error = 2;
+			return nullptr;
+		}
 
-		SSL *ssl = SSL_new(ctx);
 		if (!ssl)
 		{
 			BIO_free_all(clientBio);
-			return 4;
+			error = 3;
+			return nullptr;
 		}
 
 		SSL_set_bio(ssl, clientBio, clientBio);
 		if (SSL_accept(ssl) <= 0)
 		{
 			SSL_free(ssl);
-			return 5;
+			error = 4;
+			return nullptr;
 		}
 
-		client = ssl;
-		return 0;
+		BIO_get_ssl(clientBio, &ssl);
+		if (!ssl)
+		{
+			BIO_free_all(clientBio);
+			error = 5;
+			return nullptr;
+		}
+
+		return ssl;
 	}
 
-	static int HandleClient(SSL *ssl, char *buffer, size_t bufferSize)
+	static int HandleClient(SSL *ssl, char &buffer, size_t bufferSize)
 	{
 		if (!ssl || !buffer || bufferSize == 0)
 			return 1;
@@ -90,8 +109,7 @@ public:
 			bufferSize > static_cast<size_t>(INT_MAX)
 				? INT_MAX
 				: bufferSize);
-		char *dummy = nullptr;
-		const int bytesRead = SSL_read(ssl, dummy, capacity);
+		const int bytesRead = SSL_read(ssl, &buffer, capacity);
 		if (bytesRead > 0)
 			return 0;
 

@@ -18,10 +18,10 @@ public:
     inline static SSL *ssl = nullptr;
     inline static std::mutex outputMutex;
 
-    static int Init(const char *host, const char *port, const char *caFile = nullptr)
+    static int Init(const char *ip, const char *port, const char *caFile = nullptr)
     {
         Shutdown();
-        if (!host || !*host || !port || !*port)
+        if (!ip || !*ip || !port || !*port)
             return 1;
 
         ctx = SSL_CTX_new(TLS_client_method());
@@ -50,7 +50,7 @@ public:
             return 5;
         }
 
-        const std::string endpoint = std::string(host) + ":" + port;
+        const std::string endpoint = std::string(ip) + ":" + port;
         if (BIO_set_conn_hostname(connect_bio, endpoint.c_str()) <= 0 ||
             BIO_get_ssl(connect_bio, &ssl) <= 0 || !ssl)
         {
@@ -59,11 +59,11 @@ public:
         }
 
         X509_VERIFY_PARAM *verify = SSL_get0_param(ssl);
-        if (X509_VERIFY_PARAM_set1_ip_asc(verify, host) != 1)
+        if (X509_VERIFY_PARAM_set1_ip_asc(verify, ip) != 1)
         {
             ERR_clear_error();
-            if (SSL_set1_host(ssl, host) != 1 ||
-                SSL_set_tlsext_host_name(ssl, host) != 1)
+            if (SSL_set1_host(ssl, ip) != 1 ||
+                SSL_set_tlsext_host_name(ssl, ip) != 1)
             {
                 Shutdown();
                 return 7;
@@ -143,6 +143,11 @@ public:
         {
             SSL_CTX_free(ctx);
             ctx = nullptr;
+        }
+        if (ssl)
+        {
+            SSL_free(ssl);
+            ssl = nullptr;
         }
     }
 };
